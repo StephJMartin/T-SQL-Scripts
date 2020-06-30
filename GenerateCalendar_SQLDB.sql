@@ -1,8 +1,9 @@
 ﻿-- =============================================
--- Author:      Steph Middleton
+-- Author:      Steph Martin
 -- Create date: 2017-04-20
--- Description: Default Stored Procedure to populate a Date Dimension in a star schema.  Extend as necessary to add extra required columns. 
---			 Suitable for use with on-premises SQL Server and SQLDB
+-- Description: Stored Procedure to populate a Date Dimension in a star schema.  
+--              Extend as necessary to add extra required columns. 
+--			    Suitable for use with on-premises SQL Server and SQLDB
 -- =============================================
 
 CREATE PROCEDURE [dim].[GenerateCalendar]
