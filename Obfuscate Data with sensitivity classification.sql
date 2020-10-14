@@ -11,23 +11,24 @@ GO
 CREATE TABLE DataMaskingScripts (SchemaName NVARCHAR(128), TableName NVARCHAR(128), ColumnName NVARCHAR(128), UpdateScript NVARCHAR(MAX));
 GO
 
-DECLARE @sql NVARCHAR(MAX)
+DECLARE @sql NVARCHAR(MAX);
 
 DECLARE @SchemaName NVARCHAR(128)
 DECLARE @TableName NVARCHAR(128)
 DECLARE @ColumnName NVARCHAR(128)
-DECLARE @InformationType NVARCHAR(128);
+DECLARE @InformationType NVARCHAR(128)
 DECLARE @DataType NVARCHAR(128)
-DECLARE @CharacterMaxLength INT;
-DECLARE @NumericPrecision TINYINT;
+DECLARE @CharacterMaxLength INT
+DECLARE @NumericPrecision TINYINT
 DECLARE @NumericScale INT;
 
-DECLARE @Mask VARCHAR(50);
+DECLARE @Mask VARCHAR(100);
 
 -- Default Mask Values --
 --Strings
-DECLARE @StringMask CHAR(30) = REPLICATE('x', 10)
-DECLARE @EmailMask CHAR(100) = '@xxxxxx.com'
+DECLARE @StringMask CHAR(80) = REPLICATE('x', 80)
+DECLARE @EmailMask CHAR(80) = '@xxxxxxxxxx.com'
+DECLARE @RandomStringLen INT;
 
 -- Dates
 DECLARE @DateMask CHAR(10) = '1900-01-01' -- Date, DateTime, DateTime2
@@ -65,13 +66,17 @@ BEGIN
 	WHERE	TABLE_SCHEMA = @SchemaName
 	AND		TABLE_NAME = @TableName
 	AND		COLUMN_NAME = @ColumnName;
-		
-	-- Basic Mask Setting based on Data Type
+
+
+SET @RandomStringLen = (SELECT CAST(RAND()*(CASE WHEN @CharacterMaxLength < LEN(@StringMask) THEN @CharacterMaxLength ELSE LEN(@StringMask) END -1) + 1 AS INT));
+
+
+--	 Basic Mask Setting based on Data Type
 SET @Mask = (
 	SELECT 
 		CASE 
-		WHEN @DataType IN ('char', 'nchar', 'varchar', 'nvarchar')
-			THEN '''' + LEFT(@StringMask, @CharacterMaxLength) + ''''
+		WHEN @DataType IN ('char', 'nchar', 'varchar', 'nvarchar', 'text', 'ntext')
+			THEN '''' + RTRIM(LEFT(@StringMask, @RandomStringLen)) + ''''
 		WHEN @DataType IN ('date', 'datetime', 'datetime2', 'smalldatetime', 'datetimeoffset')
 			THEN '''' + @DateMask + ''''
 		WHEN @DataType IN ('tinyint', 'smallint', 'int', 'bigint')
@@ -91,7 +96,7 @@ SET @sql = 'UPDATE ' + @SchemaName + '.' + @TableName +
 	IF (@DataType IN ('char', 'nchar', 'varchar', 'nvarchar')) AND @ColumnName LIKE '%email%'
 		BEGIN
 			SET @sql = 'UPDATE ' + @SchemaName + '.' + @TableName + 
-				' SET ' + @ColumnName + ' = ''' + RIGHT(CONCAT(RTRIM(@StringMask), RTRIM(@EmailMask)),@CharacterMaxLength) + ''';';
+				' SET ' + @ColumnName + ' = ''' + RIGHT(CONCAT(RTRIM(LEFT(@StringMask, @RandomStringLen)), RTRIM(@EmailMask)),@CharacterMaxLength) + ''';';
 		END
 
 	-- Year fields must be valid year
@@ -104,41 +109,55 @@ SET @sql = 'UPDATE ' + @SchemaName + '.' + @TableName +
 	-- Credit Card - Column has unique index so cannot use a default mask
 	IF (@InformationType = 'Credit Card' AND @ColumnName = 'CardNumber')
 	BEGIN
-		DECLARE @sqlcommand NVARCHAR(500) = N'SELECT @NumberOfRows = COUNT(*) FROM ' + @SchemaName + '.' + @TableName + ';' 
+		DECLARE @sqlmaxrowscommand NVARCHAR(500) = N'SELECT @NumberOfRows = COUNT(*) FROM ' + @SchemaName + '.' + @TableName + ';' 
 		DECLARE @MaxRows BIGINT 
-		EXECUTE sp_executesql @sqlcommand, N'@NumberOfRows INT OUTPUT', @NumberOfRows = @MaxRows OUTPUT;
+		EXECUTE sp_executesql @sqlmaxrowscommand, N'@NumberOfRows INT OUTPUT', @NumberOfRows = @MaxRows OUTPUT;
+		DECLARE @sqlidcolcommand NVARCHAR(500) = 
+			N'SELECT @IDCol = c.[name] 
+			FROM sys.columns AS c
+			JOIN SYS.objects AS o on o.[object_id] = c.[object_id]
+			WHERE SCHEMA_NAME(o.[schema_id]) = ''' + @SchemaName + ''' AND o.[name] = ''' + @TableName + ''' AND is_identity = 1 ;';
+		DECLARE @IDColName VARCHAR(128)			
+		EXECUTE sp_executesql @sqlidcolcommand, N'@IDCol VARCHAR(128) OUTPUT', @IDCol = @IDColName OUTPUT;
 		
 		SET @sql = 
-			'DECLARE @MaxRows BIGINT = (SELECT COUNT(*) FROM ' + @SchemaName + '.' + @TableName + '); 
-			WITH Numbers
-			AS
-			(
-				SELECT 1 AS Number   
+			'DROP TABLE IF EXISTS #Numbers;
+			DECLARE @MaxRows BIGINT = (SELECT COUNT(*) FROM ' + @SchemaName + '.' + @TableName + ');
+			
+			CREATE TABLE #Numbers (Number INT);
+			WITH Numbers     
+			AS     
+			(      
+				SELECT 1 AS Number
 				UNION ALL
-				SELECT Number + 1 
-				FROM numbers 
-				WHERE number <= @MaxRows 
-			),
+				SELECT Number + 1       
+				FROM numbers       
+				WHERE number < @MaxRows      
+			)
+			INSERT INTO #Numbers (Number)
+			SELECT Number FROM Numbers
+			OPTION (maxrecursion ' + CAST(@MaxRows AS VARCHAR(20)) + ');
+			WITH
 			MaskedCardNumbers AS
 			(
 				SELECT	Number,
 						RIGHT(REPLICATE(''x'',16) + CAST(Number AS VARCHAR(16)), 16) AS MaskedCardNumber
-				FROM	Numbers AS n
+				FROM	#Numbers AS n
 			),
 			ExistingCards AS 
 			(
-				SELECT ROW_NUMBER() OVER(ORDER BY CreditCardID) AS RowNo, CreditCardID
+				SELECT ROW_NUMBER() OVER(ORDER BY ' + @IDColName + ') AS RowNo, ' + @IDColName + '
 				FROM ' + @SchemaName + '.' + @TableName + '
 			)
-			UPDATE ' + + @SchemaName + '.' + @TableName + '
+			UPDATE ' + @SchemaName + '.' + @TableName + '
 				SET ' + @ColumnName + ' = CONCAT(SUBSTRING(MaskedCardNumber, 1, 4), ''-'',
 												 SUBSTRING(MaskedCardNumber, 5, 4), ''-'',
 												 SUBSTRING(MaskedCardNumber, 9, 4), ''-'',
 												 SUBSTRING(MaskedCardNumber, 13, 4))
 			FROM MaskedCardNumbers AS MaskedCards
-			JOIN ExistingCards AS ExistingCards
-				ON ExistingCards.RowNo = MaskedCards.Number
-				OPTION (maxrecursion ' + CAST(@MaxRows AS VARCHAR(20)) + ');'
+			JOIN ExistingCards ON ExistingCards.RowNo = MaskedCards.Number
+			JOIN ' + @SchemaName + '.' + @TableName + ' AS BaseTable
+				ON BaseTable.' + @IDColName + ' = ExistingCards. ' + @IDColName + ' ;'
 			
 	END
 	
